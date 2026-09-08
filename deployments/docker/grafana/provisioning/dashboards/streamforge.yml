@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: StreamForge
+    orgId: 1
+    folder: StreamForge
+    type: file
+    disableDeletion: true
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards
+

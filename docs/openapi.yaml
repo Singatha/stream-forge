@@ -1,0 +1,56 @@
+openapi: 3.1.0
+info:
+  title: StreamForge API
+  version: 0.1.0
+  description: Phase 1 foundation endpoints for StreamForge.
+servers:
+  - url: http://localhost:8080
+paths:
+  /health:
+    get:
+      summary: Liveness probe
+      operationId: health
+      responses:
+        '200':
+          description: The API process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+  /ready:
+    get:
+      summary: Readiness probe
+      operationId: readiness
+      responses:
+        '200':
+          description: Required dependencies are available.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Readiness'
+        '503':
+          description: A required dependency is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Readiness'
+components:
+  schemas:
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          const: ok
+    Readiness:
+      type: object
+      required: [status, dependencies]
+      properties:
+        status:
+          type: string
+          enum: [ready, not_ready]
+        dependencies:
+          type: object
+          additionalProperties:
+            type: string

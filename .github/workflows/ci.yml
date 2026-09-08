@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+      - name: Vet
+        run: go vet ./...
+      - name: Lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.4.0
+      - name: Unit tests
+        run: go test -race -coverprofile=coverage.out ./...
+      - name: Integration tests
+        run: go test -tags=integration -count=1 -timeout=10m ./tests/integration/...
+      - name: Build binaries
+        run: make build
+      - name: Build container image
+        run: docker build -t streamforge:${{ github.sha }} .
