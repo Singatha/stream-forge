@@ -61,7 +61,7 @@ func TestFoundationMigration(t *testing.T) {
 			t.Fatalf("extension %s is not installed", extension)
 		}
 	}
-	for _, table := range []string{"users", "refresh_tokens"} {
+	for _, table := range []string{"users", "refresh_tokens", "videos"} {
 		var exists bool
 		if err := conn.QueryRow(ctx, `SELECT to_regclass('public.' || $1) IS NOT NULL`, table).Scan(&exists); err != nil {
 			t.Fatalf("query table %s: %v", table, err)

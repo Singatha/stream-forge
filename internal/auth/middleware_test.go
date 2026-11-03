@@ -58,3 +58,32 @@ func TestAuthenticationAndRoleMiddleware(t *testing.T) {
 		t.Fatalf("USER accessing ADMIN route status = %d", forbidden.Code)
 	}
 }
+
+func TestOptionalAuthentication(t *testing.T) {
+	principal := Principal{UserID: uuid.New(), Username: "forge", Role: user.RoleUser}
+	middleware := NewMiddleware(middlewareTokens{principal: principal})
+	handler := middleware.OptionalAuthenticate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			if _, ok := PrincipalFromContext(r.Context()); ok {
+				t.Fatal("anonymous request unexpectedly has a principal")
+			}
+		} else if actual, ok := PrincipalFromContext(r.Context()); !ok || actual != principal {
+			t.Fatalf("principal = %#v, %v", actual, ok)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	anonymous := httptest.NewRecorder()
+	handler.ServeHTTP(anonymous, httptest.NewRequest(http.MethodGet, "/", nil))
+	if anonymous.Code != http.StatusNoContent {
+		t.Fatalf("anonymous status = %d", anonymous.Code)
+	}
+
+	authenticated := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.Header.Set("Authorization", "Bearer access-token")
+	handler.ServeHTTP(authenticated, request)
+	if authenticated.Code != http.StatusNoContent {
+		t.Fatalf("authenticated status = %d", authenticated.Code)
+	}
+}

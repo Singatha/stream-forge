@@ -21,12 +21,11 @@ func NewMiddleware(tokens TokenManager) *Middleware {
 
 func (m *Middleware) Authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		parts := strings.Fields(r.Header.Get("Authorization"))
-		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		principal, present, err := m.principalFromRequest(r)
+		if !present {
 			web.WriteError(w, http.StatusUnauthorized, "AUTHENTICATION_REQUIRED", "A valid Bearer access token is required")
 			return
 		}
-		principal, err := m.tokens.ParseAccessToken(parts[1])
 		if err != nil {
 			web.WriteError(w, http.StatusUnauthorized, "INVALID_ACCESS_TOKEN", "The access token is invalid or expired")
 			return
@@ -34,6 +33,35 @@ func (m *Middleware) Authenticate(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), principalContextKey{}, principal)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func (m *Middleware) OptionalAuthenticate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		principal, present, err := m.principalFromRequest(r)
+		if !present {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if err != nil {
+			web.WriteError(w, http.StatusUnauthorized, "INVALID_ACCESS_TOKEN", "The access token is invalid or expired")
+			return
+		}
+		ctx := context.WithValue(r.Context(), principalContextKey{}, principal)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func (m *Middleware) principalFromRequest(r *http.Request) (Principal, bool, error) {
+	header := r.Header.Get("Authorization")
+	if header == "" {
+		return Principal{}, false, nil
+	}
+	parts := strings.Fields(header)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return Principal{}, true, ErrInvalidAccessToken
+	}
+	principal, err := m.tokens.ParseAccessToken(parts[1])
+	return principal, true, err
 }
 
 func (m *Middleware) RequireRole(roles ...string) func(http.Handler) http.Handler {

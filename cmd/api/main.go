@@ -18,6 +18,7 @@ import (
 	"github.com/streamforge/streamforge/internal/platform/httpserver"
 	"github.com/streamforge/streamforge/internal/platform/observability"
 	"github.com/streamforge/streamforge/internal/user"
+	"github.com/streamforge/streamforge/internal/video"
 )
 
 func main() {
@@ -61,6 +62,9 @@ func run() error {
 	registerLimiter := httpserver.NewIPRateLimiter(cfg.Auth.RegisterRateLimit, cfg.Auth.RegisterRateWindow)
 	authHandler := auth.NewHandler(authService, loginLimiter.Middleware, registerLimiter.Middleware)
 	userHandler := user.NewHandler(userService, authMiddleware.Authenticate, auth.UserIDFromContext)
+	videoRepository := video.NewPostgresRepository(pool)
+	videoService := video.NewService(videoRepository)
+	videoHandler := video.NewHandler(videoService, authMiddleware.Authenticate, authMiddleware.OptionalAuthenticate)
 
 	router := httpserver.NewRouter(
 		logger,
@@ -68,6 +72,7 @@ func run() error {
 		registry,
 		authHandler,
 		userHandler,
+		videoHandler,
 	)
 	server := &http.Server{
 		Addr:              cfg.HTTP.Address,

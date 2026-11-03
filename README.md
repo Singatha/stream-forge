@@ -1,10 +1,10 @@
 # StreamForge
 
-StreamForge is a production-minded video-streaming backend built as a modular Go monolith with independently scalable background workers. The project is intentionally being delivered in phases. **Phases 1 and 2 are complete:** the operational foundation now includes secure authentication and user profiles, without prematurely implementing video features.
+StreamForge is a production-minded video-streaming backend built as a modular Go monolith with independently scalable background workers. The project is intentionally being delivered in phases. **Phases 1–3 are complete:** the operational foundation now includes secure authentication, user profiles, and authorized video metadata management.
 
 ## Current status
 
-Implemented through Phase 2:
+Implemented through Phase 3:
 
 - Chi HTTP service with graceful startup and shutdown
 - PostgreSQL connection pooling and dependency-aware readiness
@@ -24,8 +24,13 @@ Implemented through Phase 2:
 - logout, bearer authentication, and USER/ADMIN role middleware
 - public and authenticated profile endpoints
 - strict JSON decoding, allow-listed profile updates, and auth rate limits
+- video metadata CRUD with server-controlled ownership and processing state
+- PUBLIC, PRIVATE, and UNLISTED visibility authorization
+- owner-or-ADMIN mutations and private-video non-disclosure
+- stable cursor pagination for discovery and creator video lists
+- soft deletion and indexes for ownership, publication, processing, and public discovery
 
-Video metadata and upload routes remain intentionally deferred to Phase 3 and later.
+Direct object-storage uploads and background processing remain intentionally deferred to Phase 4 and later.
 
 ## Architecture
 
@@ -34,7 +39,7 @@ The target remains a modular monolith plus worker. Module boundaries will separa
 ```mermaid
 flowchart LR
     Client --> API[Go API / Chi]
-    API --> PG[(PostgreSQL users + sessions)]
+    API --> PG[(PostgreSQL users + sessions + videos)]
     API -. later phases .-> Redis[(Redis)]
     API -. later phases .-> MQ[(RabbitMQ)]
     API -. presigned URLs .-> Object[(MinIO / S3)]
@@ -71,7 +76,7 @@ sequenceDiagram
     A-->>C: Manifest/CDN URL
 ```
 
-This sequence is a design contract for Phases 3–6, not a claim that the endpoints exist today.
+Video creation is now implemented; the upload, queue, processing, and playback portions remain a design contract for Phases 4–6.
 
 ## Technology stack
 
@@ -99,6 +104,7 @@ docs/                  embedded OpenAPI contract
 internal/
   auth/                authentication service, crypto, sessions, middleware, HTTP
   user/                user domain, repository, profile service, HTTP
+  video/               metadata domain, authorization, pagination, repository, HTTP
   config/              environment parsing and validation
   health/              liveness/readiness business logic
   platform/
@@ -111,7 +117,7 @@ deployments/docker/    Prometheus and Grafana configuration
 tests/integration/     container-backed integration tests
 ```
 
-Remaining domain directories (`video`, `upload`, and others) will be created only when their phase begins, keeping architecture intentional rather than filling the repository with empty abstractions.
+Remaining domain directories (`upload`, `transcoding`, and others) will be created only when their phase begins, keeping architecture intentional rather than filling the repository with empty abstractions.
 
 ## Local setup
 
@@ -175,7 +181,7 @@ Compose-specific service credentials are listed in [.env.example](.env.example).
 
 The service exposes `/health`, `/ready`, `/metrics`, `/docs/`, and `/openapi.yaml`. Product APIs live below `/api/v1`.
 
-Authentication and user endpoints currently available:
+Available API endpoints:
 
 ```text
 POST  /api/v1/auth/register
@@ -185,9 +191,19 @@ POST  /api/v1/auth/logout
 GET   /api/v1/users/{username}
 GET   /api/v1/users/me
 PATCH /api/v1/users/me
+GET   /api/v1/users/me/videos
+POST  /api/v1/videos
+GET   /api/v1/videos
+GET   /api/v1/videos/{id}
+PATCH /api/v1/videos/{id}
+DELETE /api/v1/videos/{id}
 ```
 
 Registration creates the account but does not automatically create a session. Login returns a short-lived access token and a refresh token. Send the access token as `Authorization: Bearer <token>`. Refresh tokens are single-use: clients must atomically replace the old value with the value returned by `/refresh`.
+
+New videos default to `PRIVATE` and `CREATED`. Clients may change only `title`, `description`, and `visibility`; IDs, ownership, processing status, counters, and publication timestamps are server-controlled. Public discovery returns only `PUBLIC` videos. `UNLISTED` metadata is reachable by ID but excluded from discovery. `PRIVATE` metadata returns `404` to everyone except its owner or an administrator.
+
+List endpoints use cursor pagination with a default limit of 20 and a maximum of 100. Pass the returned `next_cursor` unchanged to fetch the following page.
 
 Example flow:
 
@@ -219,6 +235,8 @@ Liveness checks only process health. Readiness checks PostgreSQL and returns `50
 ## Database architecture and migrations
 
 PostgreSQL is the source of truth. The Phase 1 migration enables `pgcrypto` for database-side cryptographic/UUID utilities and `pg_trgm` for later indexed search support. Phase 2 adds `citext`, `users`, and `refresh_tokens`. Database constraints enforce roles, lengths, username format, unique identities, token-hash size, and referential integrity.
+
+Phase 3 adds `videos` with UUID identifiers, immutable ownership, constrained visibility and processing states, non-negative views, publication timestamps, and soft deletion. Partial composite indexes support owner lists and public cursor pagination without indexing deleted rows; additional indexes support processing scans and publication ordering.
 
 Only Argon2id password hashes and SHA-256 hashes of 256-bit random refresh tokens are persisted. A refresh row records its family, expiry, consumption, revocation, and replacement. Rotation locks the presented row, inserts its replacement, and consumes the old token in one transaction. Presenting a consumed or revoked token revokes every token in that family before returning an authentication failure.
 
@@ -260,7 +278,7 @@ make test-integration
 make build
 ```
 
-Unit tests cover configuration, Argon2id, token parsing, authentication services, rate limiting, health behavior, request IDs, strict JSON parsing, status codes, and error envelopes. Integration tests use testcontainers-go to apply the real migrations and exercise registration, duplicate identity protection, login failures, bearer authorization, profile access, refresh rotation, replay detection, family revocation, and logout. Docker must be running for integration tests.
+Unit tests cover configuration, Argon2id, token parsing, authentication and video services, visibility rules, cursor encoding, rate limiting, health behavior, request IDs, strict JSON parsing, status codes, and error envelopes. Integration tests use testcontainers-go to apply the real migrations and exercise authentication, refresh replay protection, video CRUD, pagination, private-video IDOR protection, mass-assignment rejection, ownership, public discovery, and soft deletion. Docker must be running for integration tests.
 
 The CI workflow runs formatting, `go vet`, golangci-lint, race-enabled unit tests, PostgreSQL integration tests, binary builds, and a Docker image build.
 
@@ -281,10 +299,16 @@ Kubernetes resources are deliberately deferred until the Compose workflow and ap
 - **Short access, rotating refresh:** access tokens remain stateless and short-lived; durable refresh families support logout, rotation, replay detection, and session revocation.
 - **No credential oracle:** unknown emails and incorrect passwords use the same error and an Argon2 verification path.
 - **Allow-listed updates:** profile handlers decode dedicated DTOs and cannot bind role, email, password hash, or identifiers.
+- **Private by default:** omitted visibility creates a private video, and private reads return `404` to unauthorized callers to avoid disclosing resource existence.
+- **Server-owned lifecycle:** clients cannot assign owners, processing states, counters, publication timestamps, or identifiers.
+- **Deterministic cursors:** `(created_at, id)` ordering provides stable pagination without offset degradation or duplicate timestamps causing gaps.
+- **Soft deletion:** deleted metadata disappears immediately while retaining a durable record for the later object-cleanup workflow.
 
 ## Known limitations
 
-- There are no videos, uploads, background workers, password-reset flow, email verification, or MFA yet.
+- There are no uploads, stored video assets, background workers, playback, password-reset flow, email verification, or MFA yet.
+- Public metadata lists currently include every processing state; discovery will normally filter or rank READY videos once processing exists.
+- Soft-deleted rows are retained indefinitely until the Phase 5 deletion/retention workflow is added.
 - Logout revokes refresh tokens immediately; an already-issued access token remains valid until its short expiry.
 - Auth rate limits are bounded in-memory per API replica. Phase 8 will move distributed limits to Redis and add trusted-proxy client-IP handling.
 - Expired refresh-token cleanup is not yet scheduled; a later maintenance job should delete old rows after the audit window.
@@ -298,8 +322,8 @@ Kubernetes resources are deliberately deferred until the Compose workflow and ap
 
 1. ✅ Phase 1 — operational foundation.
 2. ✅ Phase 2 — authentication and user profiles.
-3. **Phase 3 — video metadata, ownership, visibility, and processing state.**
-4. Phase 4 — S3-compatible storage and direct uploads.
+3. ✅ Phase 3 — video metadata, ownership, visibility, and processing state.
+4. **Phase 4 — S3-compatible storage and direct uploads.**
 5. Phase 5 — RabbitMQ worker, retries, DLQ, FFmpeg, and thumbnails.
 6. Phase 6 — HLS output and playback authorization.
 7. Phase 7 — likes, comments, playlists, tags, PostgreSQL search, views, and analytics.

@@ -1,14 +1,15 @@
 openapi: 3.1.0
 info:
   title: StreamForge API
-  version: 0.2.0
-  description: StreamForge foundation and authentication APIs.
+  version: 0.3.0
+  description: StreamForge foundation, authentication, and video metadata APIs.
 servers:
   - url: http://localhost:8080
 tags:
   - name: System
   - name: Authentication
   - name: Users
+  - name: Videos
 paths:
   /health:
     get:
@@ -157,6 +158,110 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/PublicUser'}
         '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/users/me/videos:
+    get:
+      tags: [Videos]
+      summary: List videos owned by the authenticated user
+      operationId: listMyVideos
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/PageLimit'}
+        - {$ref: '#/components/parameters/PageCursor'}
+      responses:
+        '200':
+          description: A cursor-paginated page including all of the owner's visibility and processing states.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/VideoPage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/videos:
+    get:
+      tags: [Videos]
+      summary: List public video metadata
+      operationId: listVideos
+      parameters:
+        - {$ref: '#/components/parameters/PageLimit'}
+        - {$ref: '#/components/parameters/PageCursor'}
+      responses:
+        '200':
+          description: A cursor-paginated page of public videos.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/VideoPage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+    post:
+      tags: [Videos]
+      summary: Create video metadata
+      operationId: createVideo
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateVideoRequest'}
+      responses:
+        '201':
+          description: Video metadata created in the CREATED processing state.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Video'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
+  /api/v1/videos/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+    get:
+      tags: [Videos]
+      summary: Get video metadata
+      description: Public and unlisted videos are readable by ID. Private videos are disclosed only to their owner or an administrator.
+      operationId: getVideo
+      security: [{}, {bearerAuth: []}]
+      responses:
+        '200':
+          description: Video metadata.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Video'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    patch:
+      tags: [Videos]
+      summary: Update editable video metadata
+      operationId: updateVideo
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UpdateVideoRequest'}
+      responses:
+        '200':
+          description: Updated video metadata.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Video'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
+    delete:
+      tags: [Videos]
+      summary: Soft-delete video metadata
+      operationId: deleteVideo
+      security: [{bearerAuth: []}]
+      responses:
+        '204': {description: Video metadata was deleted.}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
 components:
   securitySchemes:
     bearerAuth:
@@ -171,6 +276,11 @@ components:
           schema: {$ref: '#/components/schemas/ErrorResponse'}
     Unauthorized:
       description: Authentication failed.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    Forbidden:
+      description: The authenticated user is not authorized for the operation.
       content:
         application/json:
           schema: {$ref: '#/components/schemas/ErrorResponse'}
@@ -198,6 +308,17 @@ components:
       content:
         application/json:
           schema: {$ref: '#/components/schemas/ErrorResponse'}
+  parameters:
+    PageLimit:
+      name: limit
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 100, default: 20}
+      description: Maximum number of items to return.
+    PageCursor:
+      name: cursor
+      in: query
+      schema: {type: string}
+      description: Opaque cursor returned by the previous page.
   schemas:
     RegisterRequest:
       type: object
@@ -262,6 +383,55 @@ components:
         token_type: {type: string, const: Bearer}
         expires_in: {type: integer, description: Access-token lifetime in seconds.}
         user: {$ref: '#/components/schemas/PrivateUser'}
+    VideoVisibility:
+      type: string
+      enum: [PUBLIC, PRIVATE, UNLISTED]
+    VideoProcessingStatus:
+      type: string
+      enum: [CREATED, UPLOADING, UPLOADED, PROCESSING, READY, FAILED]
+    CreateVideoRequest:
+      type: object
+      additionalProperties: false
+      required: [title]
+      properties:
+        title: {type: string, minLength: 1, maxLength: 200}
+        description: {type: string, maxLength: 5000, default: ''}
+        visibility:
+          allOf: [{$ref: '#/components/schemas/VideoVisibility'}]
+          default: PRIVATE
+    UpdateVideoRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        title: {type: string, minLength: 1, maxLength: 200}
+        description: {type: string, maxLength: 5000}
+        visibility: {$ref: '#/components/schemas/VideoVisibility'}
+    Video:
+      type: object
+      required: [id, owner_id, title, description, visibility, processing_status, view_count, created_at, updated_at]
+      properties:
+        id: {type: string, format: uuid}
+        owner_id: {type: string, format: uuid}
+        title: {type: string}
+        description: {type: string}
+        visibility: {$ref: '#/components/schemas/VideoVisibility'}
+        processing_status: {$ref: '#/components/schemas/VideoProcessingStatus'}
+        view_count: {type: integer, format: int64, minimum: 0}
+        published_at:
+          oneOf:
+            - {type: string, format: date-time}
+            - {type: 'null'}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    VideoPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/Video'}
+        next_cursor: {type: string}
     ErrorResponse:
       type: object
       required: [error]
