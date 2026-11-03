@@ -11,11 +11,13 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/streamforge/streamforge/internal/auth"
 	"github.com/streamforge/streamforge/internal/config"
 	"github.com/streamforge/streamforge/internal/health"
 	"github.com/streamforge/streamforge/internal/platform/database"
 	"github.com/streamforge/streamforge/internal/platform/httpserver"
 	"github.com/streamforge/streamforge/internal/platform/observability"
+	"github.com/streamforge/streamforge/internal/user"
 )
 
 func main() {
@@ -44,7 +46,29 @@ func run() error {
 
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
-	router := httpserver.NewRouter(logger, health.NewService(pool, cfg.Database.ConnectTimeout), registry)
+
+	userRepository := user.NewPostgresRepository(pool)
+	userService := user.NewService(userRepository)
+	passwordHasher := auth.NewArgon2idHasher()
+	tokenManager := auth.NewJWTTokenManager(cfg.Auth.JWTIssuer, cfg.Auth.JWTSecret, cfg.Auth.AccessTokenTTL)
+	sessionRepository := auth.NewPostgresSessionRepository(pool)
+	authService, err := auth.NewService(userRepository, sessionRepository, passwordHasher, tokenManager, cfg.Auth.RefreshTokenTTL)
+	if err != nil {
+		return err
+	}
+	authMiddleware := auth.NewMiddleware(tokenManager)
+	loginLimiter := httpserver.NewIPRateLimiter(cfg.Auth.LoginRateLimit, cfg.Auth.LoginRateWindow)
+	registerLimiter := httpserver.NewIPRateLimiter(cfg.Auth.RegisterRateLimit, cfg.Auth.RegisterRateWindow)
+	authHandler := auth.NewHandler(authService, loginLimiter.Middleware, registerLimiter.Middleware)
+	userHandler := user.NewHandler(userService, authMiddleware.Authenticate, auth.UserIDFromContext)
+
+	router := httpserver.NewRouter(
+		logger,
+		health.NewService(pool, cfg.Database.ConnectTimeout),
+		registry,
+		authHandler,
+		userHandler,
+	)
 	server := &http.Server{
 		Addr:              cfg.HTTP.Address,
 		Handler:           router,

@@ -52,13 +52,22 @@ func TestFoundationMigration(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close(context.Background()) })
-	for _, extension := range []string{"pgcrypto", "pg_trgm"} {
+	for _, extension := range []string{"pgcrypto", "pg_trgm", "citext"} {
 		var installed bool
 		if err := conn.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = $1)", extension).Scan(&installed); err != nil {
 			t.Fatalf("query extension %s: %v", extension, err)
 		}
 		if !installed {
 			t.Fatalf("extension %s is not installed", extension)
+		}
+	}
+	for _, table := range []string{"users", "refresh_tokens"} {
+		var exists bool
+		if err := conn.QueryRow(ctx, `SELECT to_regclass('public.' || $1) IS NOT NULL`, table).Scan(&exists); err != nil {
+			t.Fatalf("query table %s: %v", table, err)
+		}
+		if !exists {
+			t.Fatalf("table %s does not exist", table)
 		}
 	}
 }
