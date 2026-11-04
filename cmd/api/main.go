@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -17,6 +18,8 @@ import (
 	"github.com/streamforge/streamforge/internal/platform/database"
 	"github.com/streamforge/streamforge/internal/platform/httpserver"
 	"github.com/streamforge/streamforge/internal/platform/observability"
+	"github.com/streamforge/streamforge/internal/storage"
+	"github.com/streamforge/streamforge/internal/upload"
 	"github.com/streamforge/streamforge/internal/user"
 	"github.com/streamforge/streamforge/internal/video"
 )
@@ -65,6 +68,29 @@ func run() error {
 	videoRepository := video.NewPostgresRepository(pool)
 	videoService := video.NewService(videoRepository)
 	videoHandler := video.NewHandler(videoService, authMiddleware.Authenticate, authMiddleware.OptionalAuthenticate)
+	objectStore, err := storage.NewMinIOStore(storage.MinIOConfig{
+		Endpoint: cfg.Storage.Endpoint, PublicEndpoint: cfg.Storage.PublicEndpoint,
+		AccessKey: cfg.Storage.AccessKey, SecretKey: cfg.Storage.SecretKey,
+		Bucket: cfg.Storage.Bucket, Region: cfg.Storage.Region,
+		UseSSL: cfg.Storage.UseSSL, AutoCreate: cfg.Storage.AutoCreateBucket,
+	})
+	if err != nil {
+		return err
+	}
+	storageContext, cancelStorage := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelStorage()
+	if err := objectStore.EnsureBucket(storageContext); err != nil {
+		return err
+	}
+	uploadRepository := upload.NewPostgresRepository(pool)
+	uploadService := upload.NewService(
+		uploadRepository, videoRepository, objectStore,
+		cfg.Storage.PresignTTL, cfg.Storage.MaxUploadBytes,
+	)
+	uploadLimiter := httpserver.NewIPRateLimiter(cfg.Storage.UploadURLRateLimit, cfg.Storage.UploadURLRateWindow)
+	uploadHandler := upload.NewHandler(
+		uploadService, authMiddleware.Authenticate, uploadLimiter.Middleware, upload.NewMetrics(registry),
+	)
 
 	router := httpserver.NewRouter(
 		logger,
@@ -73,6 +99,7 @@ func run() error {
 		authHandler,
 		userHandler,
 		videoHandler,
+		uploadHandler,
 	)
 	server := &http.Server{
 		Addr:              cfg.HTTP.Address,

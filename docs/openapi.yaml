@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: StreamForge API
-  version: 0.3.0
-  description: StreamForge foundation, authentication, and video metadata APIs.
+  version: 0.4.0
+  description: StreamForge foundation, authentication, video metadata, and direct object-storage upload APIs.
 servers:
   - url: http://localhost:8080
 tags:
@@ -10,6 +10,7 @@ tags:
   - name: Authentication
   - name: Users
   - name: Videos
+  - name: Uploads
 paths:
   /health:
     get:
@@ -262,6 +263,62 @@ paths:
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/videos/{id}/upload-url:
+    post:
+      tags: [Uploads]
+      summary: Request a presigned source upload URL
+      description: Validates the declared source, creates a server-controlled object key, moves the video to UPLOADING, and returns a short-lived presigned PUT URL. Repeating an identical request refreshes the URL.
+      operationId: requestVideoUploadURL
+      security: [{bearerAuth: []}]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UploadURLRequest'}
+      responses:
+        '200':
+          description: Short-lived direct-upload instructions.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UploadTicket'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /api/v1/videos/{id}/upload-complete:
+    post:
+      tags: [Uploads]
+      summary: Verify and complete a source upload
+      description: Uses object-storage metadata to verify the server-generated key, exact size, signed content type, and ETag before atomically moving the asset to READY and the video to UPLOADED. Repeated successful completion is idempotent.
+      operationId: completeVideoUpload
+      security: [{bearerAuth: []}]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        '200':
+          description: The source upload is verified and durable.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UploadCompletion'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/ValidationFailed'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
 components:
   securitySchemes:
     bearerAuth:
@@ -290,7 +347,7 @@ components:
         application/json:
           schema: {$ref: '#/components/schemas/ErrorResponse'}
     Conflict:
-      description: A unique field is already registered.
+      description: The request conflicts with existing resource state.
       content:
         application/json:
           schema: {$ref: '#/components/schemas/ErrorResponse'}
@@ -305,6 +362,11 @@ components:
         Retry-After:
           schema: {type: integer}
           description: Seconds until the current rate-limit window resets.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    ServiceUnavailable:
+      description: Object storage or another required dependency is temporarily unavailable.
       content:
         application/json:
           schema: {$ref: '#/components/schemas/ErrorResponse'}
@@ -432,6 +494,52 @@ components:
           type: array
           items: {$ref: '#/components/schemas/Video'}
         next_cursor: {type: string}
+    UploadURLRequest:
+      type: object
+      additionalProperties: false
+      required: [filename, content_type, size_bytes]
+      properties:
+        filename:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Plain file name with an mp4, mov, webm, or mkv extension; paths are rejected.
+        content_type:
+          type: string
+          enum: [video/mp4, video/quicktime, video/webm, video/x-matroska, video/matroska]
+        size_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 5368709120
+          description: Declared source size. The configured deployment limit may be lower.
+    UploadTicket:
+      type: object
+      required: [video_id, asset_id, object_key, upload_url, method, required_headers, expires_at]
+      properties:
+        video_id: {type: string, format: uuid}
+        asset_id: {type: string, format: uuid}
+        object_key:
+          type: string
+          description: Server-generated key; clients cannot select it.
+        upload_url: {type: string, format: uri}
+        method: {type: string, const: PUT}
+        required_headers:
+          type: object
+          additionalProperties: {type: string}
+          description: Headers that must be included exactly in the direct PUT request.
+        expires_at: {type: string, format: date-time}
+    UploadCompletion:
+      type: object
+      required: [video_id, asset_id, processing_status, storage_status, content_type, size_bytes, completed_at]
+      properties:
+        video_id: {type: string, format: uuid}
+        asset_id: {type: string, format: uuid}
+        processing_status: {type: string, const: UPLOADED}
+        storage_status: {type: string, const: READY}
+        content_type: {type: string}
+        size_bytes: {type: integer, format: int64, minimum: 1}
+        completed_at: {type: string, format: date-time}
     ErrorResponse:
       type: object
       required: [error]
